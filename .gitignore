@@ -6,6 +6,9 @@ __pycache__/
 # .gif files
 *.gif
 
+# PyCharm files
+.Idea/
+
 # C extensions
 *.so
 

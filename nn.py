@@ -1,7 +1,7 @@
+from typing import Any
+
 import torch
-from collections import OrderedDict
 import matplotlib.pyplot as plt
-import gif_util as gif
 import torch.nn as nn
 import numpy as np
 import os
@@ -9,10 +9,10 @@ import pll
 
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
 
-input_size = 8  # ref + vco values history
+input_size = 1
 output_size = 1
 learning_rate = 0.01
-iterations = 1024*4
+iterations = 1024 * 8
 
 min_frequency = 45
 max_frequency = 55
@@ -26,52 +26,71 @@ phase = torch.rand(1) * 2 * np.pi
 # train_loader = DataLoader(train_ds, batch_size, shuffle=True)
 # val_loader = DataLoader(val_ds, batch_size)
 def accuracy(output, labels):
-    diff = torch.abs(output - labels)
+    diff = torch.sum(torch.abs(output - labels))
     return diff
 
 
 # Neural network model
 class NeuralPLLModel(nn.Module):
+
     def __init__(self):
         super().__init__()
 
-        self.network = nn.Sequential(OrderedDict([
-            ('input-1', nn.Conv1d(1, 16, 4)),
-            ('activation1', nn.ReLU()),
-            ('2-3', nn.Conv1d(16, 1, 4)),
-            ('activation1', nn.ReLU()),
-            ('3-output', nn.Linear(2, output_size))
-        ]))
+        self.hidden_dim = 32
+        self.rnn_layers = 2
+
+        self.rnn = nn.RNN(input_size,  # input size
+                          self.hidden_dim,
+                          self.rnn_layers)
+        self.output_layer = nn.Linear(self.hidden_dim, output_size)
+
         self.pll = pll.PLL()
-        self.data = torch.zeros(input_size)
-        self.time = input_size * duration
+        self.data = torch.zeros(1)
+        self.time = duration
         self.labels = self.get_sin_labels()
 
     def forward(self, xb):
-        out = self.network(xb.view(1, 1, input_size))
-        return out
+        xb_rnn = xb.view(1, 1, input_size)
+        batch_size = xb_rnn.size(0)
+        # Initializing hidden state for first input using method defined below
+        hidden = self.init_hidden(batch_size)
+
+        # Passing in the input and hidden state into the model and obtaining outputs
+        out, hidden = self.rnn(xb_rnn, hidden)
+
+        # Reshaping the outputs such that it can be fit into the fully connected layer
+        out = out.contiguous().view(-1, self.hidden_dim)
+        out = self.output_layer(out)
+
+        return out, hidden
+
+    def init_hidden(self, batch_size):
+        # This method generates the first hidden state of zeros which we'll use in the forward pass
+        hidden = torch.zeros(self.rnn_layers, batch_size, self.hidden_dim)
+        return hidden
 
     def training_step(self):
-        control_signal = self(self.data)
+        control_signal, _ = self(self.data)
+        control_signal = control_signal.flatten()
         next_value = self.pll.forward_VCO(control_signal, duration)
-        self.data = torch.roll(self.data, -1, 0)
-        self.data[input_size - 1] = next_value
+        self.data = next_value
         self.time += duration
-
         self.labels = self.get_sin_labels()
-        return self.loss_fn(self.data, self.labels), self.pll.vco_freq.item(), next_value
+        return self.loss_func(), self.pll.vco_freq.item(), next_value
 
     def step_end(self):
         self.data = self.data.detach()
         self.pll.detach()
 
     def get_sin_labels(self):
-        start_from = self.time - (input_size - 1) * duration
+        start_from = self.time
         return generate_sin(start_from, self.time, duration)
 
-    def loss_fn(self, outputs, labels):
-        loss = torch.sum((outputs - labels)*(outputs - labels))
-        return loss
+    def loss_func(self):
+        freq_diff = torch.abs(self.pll.vco_freq - ref_frequency)
+        ref_phase = (self.time*ref_frequency + phase - self.pll.vco_phase) % (2*np.pi)
+        phase_diff = torch.abs(self.pll.vco_phase - ref_phase)
+        return freq_diff
 
 
 def generate_sin(start, end, duration):
@@ -82,14 +101,14 @@ def generate_sin(start, end, duration):
 def fit(iterations,
         learning_rate,
         model,
-        opt_func=torch.optim.SGD):
+        opt_func=torch.optim.RMSprop):
     """Train the model using gradient descent"""
     losses = []
     vco_freqs = []
     vco_outs = []
     optimizer = opt_func(model.parameters(), learning_rate)
     for it in range(iterations):
-        percentile_count = round(iterations/10) + 1
+        percentile_count = round(iterations / 10) + 1
         if it % percentile_count == 0:
             print('{}%'.format(round(100 * it / iterations)))
 
@@ -102,11 +121,11 @@ def fit(iterations,
 
         # log data
         losses.append(loss.item())
-        vco_freqs.append(vco_freq/2/np.pi)
+        vco_freqs.append(vco_freq / 2 / np.pi)
         vco_outs.append(vco_out.item())
 
-
     return losses, vco_freqs, vco_outs
+
 
 # generate data and data loaders
 
@@ -123,8 +142,8 @@ ax1[0].plot(reference_signal[-100:])
 
 print('Train NN')
 losses, vco_freqs, vco_outs = fit(iterations,
-                                         learning_rate,
-                                         model)
+                                  learning_rate,
+                                  model)
 
 ax1[1].set_title('VCO vs Reference')
 ax1[1].plot(reference_signal[-200:])
@@ -135,9 +154,9 @@ ax2[0].set_ylabel('Loss')
 ax2[0].set_xlabel('iteration')
 ax2[0].plot(losses[::10])
 
-ax2[1].set_title('VCO frequency. Ref = {:.1f}Hz'.format(ref_frequency.item()/2/np.pi))
+ax2[1].set_title('VCO frequency. Ref = {:.1f}Hz'.format(ref_frequency.item() / 2 / np.pi))
 ax2[1].set_xlabel('iteration')
-ax2[1].axline((0, ref_frequency.item()/2/np.pi), (1, ref_frequency.item()/2/np.pi))
+ax2[1].axline((0, ref_frequency.item() / 2 / np.pi), (1, ref_frequency.item() / 2 / np.pi))
 ax2[1].plot(vco_freqs[::10], color='r')
 
 plt.show()

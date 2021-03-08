@@ -88,9 +88,8 @@ class NeuralPLLModel(nn.Module):
 
     def loss_func(self):
         freq_diff = torch.abs(self.pll.vco_freq - ref_frequency)
-        ref_phase = (self.time*ref_frequency + phase - self.pll.vco_phase) % (2*np.pi)
-        phase_diff = torch.abs(self.pll.vco_phase - ref_phase)
-        return freq_diff
+        phase_diff = (self.time*ref_frequency + phase - self.pll.vco_phase) % (2*np.pi)
+        return freq_diff + phase_diff
 
 
 def generate_sin(start, end, duration):
